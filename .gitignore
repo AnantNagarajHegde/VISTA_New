@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment (From your image)
+venv/
+ENV/
+env/
+
+# Logs (From your image)
+*.log
+
+# User Uploads (From your image)
+backend/uploads/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+frontend/node_modules/
+
+
