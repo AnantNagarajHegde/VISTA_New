@@ -1,8 +1,9 @@
-﻿import { useState, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import CaseControl from './components/CaseControl';
 import CaseDetails from './components/CaseDetails';
 import TransactionsTable from './components/TransactionsTable';
 import FileResults from './components/FileResults';
+import MoneyFlowGraph from './components/MoneyFlowGraph';
 import {
   createCase,
   getCase,
@@ -10,11 +11,13 @@ import {
   getFileResults,
   uploadFiles,
   loadDemoCase,
+  getFlowData,
 } from './api';
 import type {
   CaseData,
   TransactionsResponse,
   FileResult,
+  FlowData,
 } from './api';
 
 interface Toast {
@@ -27,11 +30,13 @@ function App() {
   const [caseData, setCaseData] = useState<CaseData | null>(null);
   const [transactions, setTransactions] = useState<TransactionsResponse | null>(null);
   const [fileResultsList, setFileResultsList] = useState<FileResult[]>([]);
+  const [flowData, setFlowData] = useState<FlowData | null>(null);
+  const [flowLoading, setFlowLoading] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('');
   const [loadingSubMessage, setLoadingSubMessage] = useState('');
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [activeTab, setActiveTab] = useState<'transactions' | 'files'>('transactions');
+  const [activeTab, setActiveTab] = useState<'transactions' | 'files' | 'flow'>('transactions');
 
   const addToast = useCallback((message: string, type: 'success' | 'error') => {
     const id = Date.now();
@@ -51,6 +56,13 @@ function App() {
       setCaseData(caseInfo);
       setTransactions(txns);
       setFileResultsList(files.files);
+
+      // Fetch flow data in background
+      setFlowLoading(true);
+      getFlowData(caseId)
+        .then(fd => setFlowData(fd))
+        .catch(err => console.error('Failed to get flow data:', err))
+        .finally(() => setFlowLoading(false));
     } catch (err) {
       console.error('Failed to refresh data:', err);
     }
@@ -165,6 +177,12 @@ function App() {
           >
             Processed Files ({fileResultsList.length})
           </button>
+          <button
+            className={`tab ${activeTab === 'flow' ? 'active' : ''}`}
+            onClick={() => setActiveTab('flow')}
+          >
+            Money Flow {flowData ? `(${flowData.accounts.length})` : ''}
+          </button>
         </div>
       )}
 
@@ -178,6 +196,9 @@ function App() {
       )}
       {activeTab === 'files' && (
         <FileResults files={fileResultsList} />
+      )}
+      {activeTab === 'flow' && (
+        <MoneyFlowGraph data={flowData} isLoading={flowLoading} />
       )}
 
       {/* Loading Overlay */}

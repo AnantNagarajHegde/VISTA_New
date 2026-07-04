@@ -1,4 +1,4 @@
-﻿const API_BASE = 'http://localhost:8000/api';
+const API_BASE = 'http://localhost:8000/api';
 
 export interface CaseData {
   id: string;
@@ -108,5 +108,34 @@ export async function uploadFiles(caseId: string, files: File[]): Promise<Upload
 export async function loadDemoCase(): Promise<DemoResponse> {
   const res = await fetch(`${API_BASE}/case/demo`, { method: 'POST' });
   if (!res.ok) throw new Error(`Failed to load demo case: ${res.statusText}`);
+  return res.json();
+}
+
+export interface FlowAccount {
+  id: string;
+  label: string;
+  type: 'primary' | 'counterparty';
+  transaction_count: number;
+  total_debit: number;
+  total_credit: number;
+}
+
+export interface FlowEdge {
+  source: string;
+  target: string;
+  amount: number;
+  count: number;
+}
+
+export interface FlowData {
+  accounts: FlowAccount[];
+  edges: FlowEdge[];
+  total_accounts: number;
+  total_edges: number;
+}
+
+export async function getFlowData(caseId: string): Promise<FlowData> {
+  const res = await fetch(`${API_BASE}/case/${caseId}/flow`);
+  if (!res.ok) throw new Error(`Failed to get flow data: ${res.statusText}`);
   return res.json();
 }
