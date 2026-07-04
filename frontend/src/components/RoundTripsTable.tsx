@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
 import type { RoundTrip } from '../api';
 
 interface RoundTripsTableProps {
@@ -121,16 +121,38 @@ export default function RoundTripsTable({ data, isLoading }: RoundTripsTableProp
                     </thead>
                     <tbody>
                       {rt.hops.map((hop, hIdx) => (
-                        <tr key={hIdx}>
-                          <td className="account-id" title={hop.from}>{hop.from}</td>
-                          <td style={{ color: 'var(--accent-orange)', textAlign: 'center' }}>→</td>
-                          <td className="account-id" title={hop.to}>{hop.to}</td>
-                          <td className="amount-debit">{formatAmount(hop.amount)}</td>
-                          <td style={{ textAlign: 'center' }}>{hop.count}</td>
-                          <td style={{ fontSize: 'var(--font-xs)', color: 'var(--text-muted)' }}>
-                            {hop.date_range || '-'}
-                          </td>
-                        </tr>
+                        <React.Fragment key={hIdx}>
+                          <tr>
+                            <td className="account-id" title={hop.from}>{hop.from}</td>
+                            <td style={{ color: 'var(--accent-orange)', textAlign: 'center' }}>→</td>
+                            <td className="account-id" title={hop.to}>{hop.to}</td>
+                            <td className="amount-debit">{formatAmount(hop.amount)}</td>
+                            <td style={{ textAlign: 'center' }}>{hop.count}</td>
+                            <td style={{ fontSize: 'var(--font-xs)', color: 'var(--text-muted)' }}>
+                              {hop.date_range || '-'}
+                            </td>
+                          </tr>
+                          {hop.matched_txns && hop.matched_txns.length > 0 && (
+                            <tr className="rt-evidence-row" style={{ backgroundColor: 'var(--surface-sunken)' }}>
+                              <td colSpan={6} style={{ padding: '8px 16px', borderBottom: '1px solid var(--border)' }}>
+                                <div style={{ fontSize: 'var(--font-xs)', color: 'var(--text-muted)', marginBottom: 4 }}>
+                                  <strong>Exact Evidence:</strong>
+                                </div>
+                                <ul style={{ listStyleType: 'none', padding: 0, margin: 0 }}>
+                                  {hop.matched_txns.map((txn, tIdx) => (
+                                    <li key={tIdx} style={{ marginBottom: 4, display: 'flex', gap: '16px' }}>
+                                      <span style={{ minWidth: 80, color: 'var(--text-primary)' }}>{txn.date || '-'}</span>
+                                      <span style={{ minWidth: 100, color: 'var(--accent-red)' }}>{formatAmount(txn.amount)}</span>
+                                      <span style={{ flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={txn.narration}>
+                                        {txn.narration || '-'}
+                                      </span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
                       ))}
                     </tbody>
                   </table>

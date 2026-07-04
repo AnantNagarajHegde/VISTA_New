@@ -44,6 +44,7 @@ function App() {
   const [loadingSubMessage, setLoadingSubMessage] = useState('');
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [activeTab, setActiveTab] = useState<TabId>('transactions');
+  const [searchTerm, setSearchTerm] = useState('');
 
   const addToast = useCallback((message: string, type: 'success' | 'error') => {
     const id = Date.now();
@@ -53,11 +54,11 @@ function App() {
     }, 5000);
   }, []);
 
-  const refreshData = useCallback(async (caseId: string, page: number = 1) => {
+  const refreshData = useCallback(async (caseId: string, page: number = 1, search?: string) => {
     try {
       const [caseInfo, txns, files] = await Promise.all([
         getCase(caseId),
-        getTransactions(caseId, page, 250),
+        getTransactions(caseId, page, 250, search),
         getFileResults(caseId),
       ]);
       setCaseData(caseInfo);
@@ -142,10 +143,21 @@ function App() {
   const handlePageChange = useCallback(async (page: number) => {
     if (!caseData) return;
     try {
-      const txns = await getTransactions(caseData.id, page, 250);
+      const txns = await getTransactions(caseData.id, page, 250, searchTerm);
       setTransactions(txns);
     } catch (err) {
       console.error('Failed to change page:', err);
+    }
+  }, [caseData, searchTerm]);
+
+  const handleSearch = useCallback(async (term: string) => {
+    if (!caseData) return;
+    setSearchTerm(term);
+    try {
+      const txns = await getTransactions(caseData.id, 1, 250, term);
+      setTransactions(txns);
+    } catch (err) {
+      console.error('Failed to search:', err);
     }
   }, [caseData]);
 
@@ -230,6 +242,7 @@ function App() {
         <TransactionsTable
           data={transactions}
           onPageChange={handlePageChange}
+          onSearch={handleSearch}
           isLoading={false}
         />
       )}

@@ -5,6 +5,7 @@ Handles file upload, parsing, analysis, and case management.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import uuid
@@ -46,6 +47,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 DATASET_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "Bank-statements-dataset", "Bank-statements-dataset")
 )
+CACHE_FILE = os.path.join(UPLOAD_DIR, "demo_cache.json")
 MAX_PARSE_WORKERS = min(4, max(1, os.cpu_count() or 1))
 
 cases: dict = {}
@@ -259,13 +261,27 @@ async def get_case(case_id: str):
 
 
 @app.get("/api/case/{case_id}/transactions")
-async def get_transactions(case_id: str, page: int = 1, page_size: int = 100):
+async def get_transactions(case_id: str, page: int = 1, page_size: int = 100, search: str = None):
     if case_id not in all_transactions:
         raise HTTPException(status_code=404, detail="Case not found")
 
     page = max(1, page)
     page_size = min(max(25, page_size), 500)
     txns = all_transactions[case_id]
+    
+    if search:
+        term = search.lower()
+        txns = [t for t in txns if (
+            term in (t.get("narration") or "").lower() or
+            term in (t.get("source_file") or "").lower() or
+            term in (t.get("date") or "").lower() or
+            term in (t.get("account_no") or "").lower() or
+            term in (t.get("account_name") or "").lower() or
+            term in (t.get("counterparty_account") or "").lower() or
+            term in (t.get("upi_id") or "").lower() or
+            term in (t.get("ifsc") or "").lower() or
+            term in (t.get("review_reasons") or "").lower()
+        )]
     total = len(txns)
     start = (page - 1) * page_size
     end = start + page_size
@@ -308,6 +324,26 @@ async def upload_files(case_id: str, files: list[UploadFile] = File(...)):
 @app.post("/api/case/demo")
 async def load_demo_case():
     case_id = "demo"
+    
+    # Try to load from cache
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r") as f:
+                cached_data = json.load(f)
+            cases[case_id] = cached_data["case"]
+            all_transactions[case_id] = cached_data["transactions"]
+            file_results[case_id] = cached_data["file_results"]
+            analysis_cache.pop(case_id, None)
+            return {
+                "case_id": case_id,
+                "files_processed": len(file_results[case_id]),
+                "files_succeeded": sum(1 for r in file_results[case_id] if r.get("success")),
+                "files_failed": sum(1 for r in file_results[case_id] if not r.get("success")),
+                "total_transactions": len(all_transactions[case_id]),
+            }
+        except Exception as e:
+            print(f"Failed to load cache: {e}. Re-parsing.")
+            
     _new_case(case_id=case_id, name="VISTA Demo Case", investigator="Analyst")
     cases[case_id]["status"] = "processing"
 
@@ -322,6 +358,27 @@ async def load_demo_case():
                 parse_targets.append((file_path, folder))
 
     summary = _record_results(case_id, _parse_paths(parse_targets))
+    
+    # Enrich transactions with extracted account numbers
+    from analyzer import _owner_account_map
+    owner_map = _owner_account_map(all_transactions[case_id])
+    for txn in all_transactions[case_id]:
+        if not txn.get("account_no"):
+            sf = (txn.get("source_file") or "").strip()
+            if sf in owner_map:
+                txn["account_no"] = owner_map[sf]
+                
+    # Save to cache
+    try:
+        with open(CACHE_FILE, "w") as f:
+            json.dump({
+                "case": cases[case_id],
+                "transactions": all_transactions[case_id],
+                "file_results": file_results[case_id]
+            }, f)
+    except Exception as e:
+        print(f"Failed to write cache: {e}")
+        
     return {
         "case_id": case_id,
         "files_processed": summary["files_processed"],
@@ -329,6 +386,13 @@ async def load_demo_case():
         "files_failed": summary["files_failed"],
         "total_transactions": summary["total_transactions"],
     }
+
+
+@app.post("/api/case/demo/force-reload")
+async def force_reload_demo_case():
+    if os.path.exists(CACHE_FILE):
+        os.remove(CACHE_FILE)
+    return await load_demo_case()
 
 
 @app.get("/api/case/{case_id}/analysis")

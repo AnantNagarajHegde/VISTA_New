@@ -1,9 +1,10 @@
-﻿import { useState, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import type { Transaction, TransactionsResponse } from '../api';
 
 interface TransactionsTableProps {
   data: TransactionsResponse | null;
   onPageChange: (page: number) => void;
+  onSearch: (term: string) => void;
   isLoading: boolean;
 }
 
@@ -33,10 +34,10 @@ function statusLabel(txn: Transaction): { label: string; className: string; titl
 type SortField = 'date' | 'debit' | 'credit' | 'balance' | 'narration' | 'source_file' | 'status';
 type SortDir = 'asc' | 'desc';
 
-export default function TransactionsTable({ data, onPageChange, isLoading }: TransactionsTableProps) {
+export default function TransactionsTable({ data, onPageChange, onSearch, isLoading }: TransactionsTableProps) {
   const [sortField, setSortField] = useState<SortField>('date');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
-  const [searchTerm, setSearchTerm] = useState('');
+  const [localSearch, setLocalSearch] = useState('');
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -55,21 +56,6 @@ export default function TransactionsTable({ data, onPageChange, isLoading }: Tra
   const filteredAndSorted = useMemo(() => {
     if (!data?.transactions) return [];
     let txns = [...data.transactions];
-
-    if (searchTerm) {
-      const term = searchTerm.toLowerCase();
-      txns = txns.filter(t =>
-        (t.narration?.toLowerCase().includes(term)) ||
-        (t.source_file?.toLowerCase().includes(term)) ||
-        (t.date?.toLowerCase().includes(term)) ||
-        (t.account_no?.toLowerCase().includes(term)) ||
-        (t.account_name?.toLowerCase().includes(term)) ||
-        (t.counterparty_account?.toLowerCase().includes(term)) ||
-        (t.upi_id?.toLowerCase().includes(term)) ||
-        (t.ifsc?.toLowerCase().includes(term)) ||
-        (t.review_reasons?.toLowerCase().includes(term))
-      );
-    }
 
     txns.sort((a, b) => {
       let valA: string | number | null = null;
@@ -118,7 +104,7 @@ export default function TransactionsTable({ data, onPageChange, isLoading }: Tra
     });
 
     return txns;
-  }, [data?.transactions, sortField, sortDir, searchTerm]);
+  }, [data?.transactions, sortField, sortDir]);
 
   if (!data || data.total === 0) {
     return (
@@ -144,17 +130,22 @@ export default function TransactionsTable({ data, onPageChange, isLoading }: Tra
           <span className="transactions-title">Extracted Transactions</span>
           <span className="transactions-count" style={{ marginLeft: 12 }}>
             {data.total.toLocaleString()} total
-            {searchTerm && ` - ${filteredAndSorted.length.toLocaleString()} matching this page`}
           </span>
         </div>
-        <div className="search-bar">
+        <div className="search-bar" style={{ display: 'flex' }}>
           <input
             type="text"
             className="search-input"
-            placeholder="Search narration, file, account, flag..."
-            value={searchTerm}
-            onChange={e => setSearchTerm(e.target.value)}
+            placeholder="Search globally (press Enter)..."
+            value={localSearch}
+            onChange={e => setLocalSearch(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') onSearch(localSearch);
+            }}
           />
+          <button className="badge badge-default" style={{ marginLeft: 8, cursor: 'pointer', border: 'none' }} onClick={() => onSearch(localSearch)}>
+            Search
+          </button>
         </div>
       </div>
 

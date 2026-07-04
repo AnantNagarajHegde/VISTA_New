@@ -171,6 +171,9 @@ def build_account_graph(transactions: list[dict]) -> dict:
         credit_index[acc_id] = credits
     
     # For each pair (A, B) where A != B, match A's debits to B's credits
+    global_used_credits: dict[str, set[int]] = defaultdict(set)
+    global_used_debits: dict[str, set[int]] = defaultdict(set)
+    
     for src_id in primary_ids:
         src_debits = []
         for txn in by_owner[src_id]:
@@ -195,9 +198,12 @@ def build_account_graph(transactions: list[dict]) -> dict:
             matched_amount = 0.0
             matched_count = 0
             matched_dates = []
-            used_credits = set()  # Avoid double-matching
+            matched_txns = []
             
-            for d_date, d_amt, d_txn in src_debits:
+            for d_idx, (d_date, d_amt, d_txn) in enumerate(src_debits):
+                if d_idx in global_used_debits[src_id]:
+                    continue
+                    
                 # Look for matching credit in dst within ±1 day and ±2% amount
                 
                 # Binary search / two pointer optimization to find the start index
@@ -209,7 +215,7 @@ def build_account_graph(transactions: list[dict]) -> dict:
                 for c_idx in range(start_c_idx, len(dst_credits)):
                     c_date, c_amt, c_txn = dst_credits[c_idx]
                     
-                    if c_idx in used_credits:
+                    if c_idx in global_used_credits[dst_id]:
                         continue
                     
                     # Date proximity check
@@ -231,9 +237,15 @@ def build_account_graph(transactions: list[dict]) -> dict:
                     # Match found!
                     matched_amount += d_amt
                     matched_count += 1
-                    used_credits.add(c_idx)
+                    global_used_credits[dst_id].add(c_idx)
+                    global_used_debits[src_id].add(d_idx)
                     date_str = d_date.strftime("%Y-%m-%d")
                     matched_dates.append(date_str)
+                    matched_txns.append({
+                        "date": date_str,
+                        "amount": round(d_amt, 2),
+                        "narration": d_txn.get("narration", "")
+                    })
                     break
             
             if matched_count >= 1 and matched_amount >= 1000:
@@ -242,6 +254,7 @@ def build_account_graph(transactions: list[dict]) -> dict:
                     "amount": round(matched_amount, 2),
                     "count": matched_count,
                     "dates": sorted(set(matched_dates)),
+                    "matched_txns": matched_txns,
                     "method": "amount_date_correlation",
                 }
     
@@ -264,11 +277,17 @@ def build_account_graph(transactions: list[dict]) -> dict:
                         "amount": 0.0,
                         "count": 0,
                         "dates": [],
+                        "matched_txns": [],
                         "method": "narration_extraction",
                     }
                 edges[edge_key]["amount"] = round(edges[edge_key]["amount"] + debit, 2)
                 edges[edge_key]["count"] += 1
                 date_str = txn.get("date") or ""
+                edges[edge_key]["matched_txns"].append({
+                    "date": date_str,
+                    "amount": round(debit, 2),
+                    "narration": txn.get("narration", "")
+                })
                 if date_str:
                     edges[edge_key]["dates"].append(date_str)
     
@@ -299,8 +318,8 @@ def build_account_graph(transactions: list[dict]) -> dict:
 
 def detect_round_trips(
     graph: dict,
-    min_amount: float = 10000.0,
-    max_depth: int = 4,
+    min_amount: float = 100000.0,
+    max_depth: int = 3,
 ) -> list[dict]:
     """Detect circular money movement (A → B → … → A).
 
@@ -404,7 +423,7 @@ def detect_round_trips(
         })
 
     results.sort(key=lambda c: c["total_amount"], reverse=True)
-    return results
+    return results[:500]
 
 
 def _cycle_risk_score(path, hops, nodes) -> str:

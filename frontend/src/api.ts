@@ -80,6 +80,7 @@ export interface RoundTripHop {
   amount: number;
   count: number;
   date_range: string;
+  matched_txns?: { date: string; amount: number; narration: string }[];
 }
 
 export interface RoundTrip {
@@ -161,19 +162,26 @@ export async function createCase(name: string = 'VISTA Case', investigator: stri
 }
 
 export async function getCase(caseId: string): Promise<CaseData> {
-  const res = await fetch(`${API_BASE}/case/${caseId}`);
+  const res = await fetch(`${API_BASE}/case/${caseId}`, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Failed to get case: ${res.statusText}`);
   return res.json();
 }
 
-export async function getTransactions(caseId: string, page: number = 1, pageSize: number = 250): Promise<TransactionsResponse> {
-  const res = await fetch(`${API_BASE}/case/${caseId}/transactions?page=${page}&page_size=${pageSize}`);
+export async function getTransactions(caseId: string, page: number = 1, pageSize: number = 250, search?: string): Promise<TransactionsResponse> {
+  const query = new URLSearchParams({
+    page: page.toString(),
+    page_size: pageSize.toString()
+  });
+  if (search) {
+    query.append('search', search);
+  }
+  const res = await fetch(`${API_BASE}/case/${caseId}/transactions?${query.toString()}`, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Failed to get transactions: ${res.statusText}`);
   return res.json();
 }
 
 export async function getFileResults(caseId: string): Promise<{ files: FileResult[] }> {
-  const res = await fetch(`${API_BASE}/case/${caseId}/files`);
+  const res = await fetch(`${API_BASE}/case/${caseId}/files`, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Failed to get file results: ${res.statusText}`);
   return res.json();
 }
@@ -198,7 +206,7 @@ export async function loadDemoCase(): Promise<DemoResponse> {
 }
 
 export async function getAnalysis(caseId: string): Promise<AnalysisData> {
-  const res = await fetch(`${API_BASE}/case/${caseId}/analysis`);
+  const res = await fetch(`${API_BASE}/case/${caseId}/analysis`, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Failed to get analysis: ${res.statusText}`);
   return res.json();
 }
