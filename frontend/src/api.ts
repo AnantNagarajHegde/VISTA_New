@@ -64,6 +64,92 @@ export interface DemoResponse {
   total_transactions: number;
 }
 
+// --- Analysis Types ---
+
+export interface FundFlowRow {
+  source: string;
+  destination: string;
+  total_amount: number;
+  transaction_count: number;
+  date_range: string;
+}
+
+export interface RoundTripHop {
+  from: string;
+  to: string;
+  amount: number;
+  count: number;
+  date_range: string;
+}
+
+export interface RoundTrip {
+  cycle_path: string[];
+  num_hops: number;
+  total_amount: number;
+  min_edge_amount: number;
+  hops: RoundTripHop[];
+  date_range: string;
+  risk_score: string;
+}
+
+export interface MoneyTrailDest {
+  date: string | null;
+  narration: string;
+  amount: number;
+  destination: string;
+  source_file: string;
+}
+
+export interface MoneyTrail {
+  account: string;
+  credit_date: string | null;
+  credit_amount: number;
+  credit_narration: string;
+  credit_source: string;
+  amount_traced: number;
+  amount_untraced: number;
+  destinations: MoneyTrailDest[];
+}
+
+export interface SuspiciousAccount {
+  account_id: string;
+  is_primary: boolean;
+  total_in: number;
+  total_out: number;
+  net_flow: number;
+  tx_count: number;
+  fan_in: number;
+  fan_out: number;
+  reasons: string[];
+  risk_level: string;
+  risk_score: number;
+}
+
+export interface CaseSummary {
+  total_transactions: number;
+  total_source_files: number;
+  total_primary_accounts: number;
+  total_unique_accounts: number;
+  date_range: string;
+  total_debit: number;
+  total_credit: number;
+  round_trips_detected: number;
+  suspicious_accounts_count: number;
+  critical_accounts: number;
+  high_risk_accounts: number;
+  top_flows: FundFlowRow[];
+}
+
+export interface AnalysisData {
+  summary: CaseSummary;
+  round_trips: RoundTrip[];
+  money_trail: MoneyTrail[];
+  fund_flow_summary: FundFlowRow[];
+  suspicious_accounts: SuspiciousAccount[];
+}
+
+// --- API Functions ---
+
 export async function createCase(name: string = 'VISTA Case', investigator: string = 'Analyst'): Promise<CaseData> {
   const res = await fetch(`${API_BASE}/case/create`, {
     method: 'POST',
@@ -111,31 +197,36 @@ export async function loadDemoCase(): Promise<DemoResponse> {
   return res.json();
 }
 
-export interface FlowAccount {
-  id: string;
-  label: string;
-  type: 'primary' | 'counterparty';
-  transaction_count: number;
-  total_debit: number;
-  total_credit: number;
-}
-
-export interface FlowEdge {
-  source: string;
-  target: string;
-  amount: number;
-  count: number;
-}
-
-export interface FlowData {
-  accounts: FlowAccount[];
-  edges: FlowEdge[];
-  total_accounts: number;
-  total_edges: number;
-}
-
-export async function getFlowData(caseId: string): Promise<FlowData> {
-  const res = await fetch(`${API_BASE}/case/${caseId}/flow`);
-  if (!res.ok) throw new Error(`Failed to get flow data: ${res.statusText}`);
+export async function getAnalysis(caseId: string): Promise<AnalysisData> {
+  const res = await fetch(`${API_BASE}/case/${caseId}/analysis`);
+  if (!res.ok) throw new Error(`Failed to get analysis: ${res.statusText}`);
   return res.json();
+}
+
+export async function downloadExcel(caseId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/case/${caseId}/export/excel`);
+  if (!res.ok) throw new Error(`Failed to download Excel: ${res.statusText}`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `VISTA_Report_${caseId}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+export async function downloadPdf(caseId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/case/${caseId}/export/pdf`);
+  if (!res.ok) throw new Error(`Failed to download PDF: ${res.statusText}`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `VISTA_Report_${caseId}.pdf`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }

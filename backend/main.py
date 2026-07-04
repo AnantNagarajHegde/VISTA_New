@@ -1,6 +1,6 @@
 """
 VISTA Backend - FastAPI Application
-Handles file upload, parsing, and case management for the hackathon MVP.
+Handles file upload, parsing, analysis, and case management.
 """
 
 from __future__ import annotations
@@ -14,15 +14,18 @@ from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from parser.extractor import extract_file
+from analyzer import run_full_analysis
+from exporter import export_excel, export_pdf
 
 
 app = FastAPI(
     title="VISTA API",
     description="Automated Bank Statement Analysis System",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -30,7 +33,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173", "http://127.0.0.1:5173",
         "http://localhost:5174", "http://127.0.0.1:5174",
-        "http://localhost:5175", "http://127.0.0.1:5175"
+        "http://localhost:5175", "http://127.0.0.1:5175",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -48,6 +51,7 @@ MAX_PARSE_WORKERS = min(4, max(1, os.cpu_count() or 1))
 cases: dict = {}
 all_transactions: dict = {}
 file_results: dict = {}
+analysis_cache: dict = {}
 
 
 class CaseCreate(BaseModel):
@@ -72,6 +76,7 @@ def _new_case(case_id: Optional[str] = None, name: str = "VISTA Case", investiga
     cases[case_id] = case
     all_transactions[case_id] = []
     file_results[case_id] = []
+    analysis_cache.pop(case_id, None)
     return case
 
 
@@ -147,6 +152,8 @@ def _update_case_stats(case_id: str) -> None:
     cases[case_id]["needs_review"] = stats["needs_review"]
     cases[case_id]["alerts"] = stats["alerts"]
     cases[case_id]["status"] = "analyzed"
+    # Invalidate analysis cache when data changes
+    analysis_cache.pop(case_id, None)
 
 
 def _tag_source(result: dict, prefix: str) -> dict:
@@ -217,6 +224,22 @@ def _record_results(case_id: str, results: list[dict]) -> dict:
         ],
     }
 
+
+def _get_analysis(case_id: str) -> dict:
+    """Get or compute analysis for a case (cached)."""
+    if case_id in analysis_cache:
+        return analysis_cache[case_id]
+    txns = all_transactions.get(case_id, [])
+    if not txns:
+        return {"summary": {}, "round_trips": [], "money_trail": [], "fund_flow_summary": [], "suspicious_accounts": []}
+    result = run_full_analysis(txns)
+    analysis_cache[case_id] = result
+    return result
+
+
+# ---------------------------------------------------------------------------
+# API Endpoints
+# ---------------------------------------------------------------------------
 
 @app.get("/api/health")
 async def health():
@@ -308,137 +331,55 @@ async def load_demo_case():
     }
 
 
-@app.get("/api/case/{case_id}/flow")
-async def get_flow_data(case_id: str, top_n: int = 50):
-    """Extract unique accounts and build directed money-flow edges.
+@app.get("/api/case/{case_id}/analysis")
+async def get_analysis(case_id: str):
+    """Return full fraud analysis results."""
+    if case_id not in all_transactions:
+        raise HTTPException(status_code=404, detail="Case not found")
+    return _get_analysis(case_id)
 
-    Returns at most *top_n* accounts (by total volume) and the edges
-    between them so the frontend graph stays readable and performant.
-    """
+
+@app.get("/api/case/{case_id}/export/excel")
+async def export_excel_report(case_id: str):
+    """Download an Excel investigation report."""
     if case_id not in all_transactions:
         raise HTTPException(status_code=404, detail="Case not found")
 
-    top_n = max(10, min(top_n, 200))
+    case = cases[case_id]
     txns = all_transactions[case_id]
+    analysis = _get_analysis(case_id)
 
-    # --- Collect accounts and edges ---
-    account_info: dict[str, dict] = {}
-    edge_agg: dict[tuple, dict] = {}
+    xlsx_bytes = export_excel(case, txns, analysis)
 
-    def _ensure_account(acc_id: str, acc_type: str = "counterparty", label: str | None = None):
-        if not acc_id:
-            return
-        if acc_id not in account_info:
-            account_info[acc_id] = {
-                "id": acc_id,
-                "label": label or acc_id,
-                "type": acc_type,
-                "transaction_count": 0,
-                "total_debit": 0.0,
-                "total_credit": 0.0,
-            }
-        if acc_type == "primary":
-            account_info[acc_id]["type"] = "primary"
-
-    def _add_edge(src: str, tgt: str, amount: float):
-        if not src or not tgt or src == tgt:
-            return
-        key = (src, tgt)
-        if key not in edge_agg:
-            edge_agg[key] = {"source": src, "target": tgt, "amount": 0.0, "count": 0}
-        edge_agg[key]["amount"] = round(edge_agg[key]["amount"] + amount, 2)
-        edge_agg[key]["count"] += 1
-
-    # Build source_file -> owner account mapping
-    file_to_account: dict[str, str] = {}
-    for txn in txns:
-        sf = txn.get("source_file") or ""
-        acc = (txn.get("account_no") or "").strip()
-        if sf and acc and sf not in file_to_account:
-            file_to_account[sf] = acc
-    for txn in txns:
-        sf = txn.get("source_file") or ""
-        if sf and sf not in file_to_account:
-            base = os.path.splitext(os.path.basename(sf))[0]
-            file_to_account[sf] = base
-
-    # Register primary accounts
-    for _sf, acc_id in file_to_account.items():
-        _ensure_account(acc_id, "primary", acc_id)
-
-    # Build edges and track stats for BOTH owner and counterparty
-    for txn in txns:
-        sf = txn.get("source_file") or ""
-        owner_id = file_to_account.get(sf, "")
-        if not owner_id:
-            continue
-
-        debit = _money(txn.get("debit"))
-        credit = _money(txn.get("credit"))
-
-        # Update owner stats
-        if owner_id in account_info:
-            account_info[owner_id]["transaction_count"] += 1
-            account_info[owner_id]["total_debit"] = round(
-                account_info[owner_id]["total_debit"] + debit, 2
-            )
-            account_info[owner_id]["total_credit"] = round(
-                account_info[owner_id]["total_credit"] + credit, 2
-            )
-
-        # Determine counterparty
-        cp = (txn.get("counterparty_account") or "").strip()
-        if not cp:
-            cp = (txn.get("upi_id") or "").strip()
-        if not cp:
-            continue
-
-        _ensure_account(cp, "counterparty", cp)
-
-        # Update counterparty stats (mirror of owner)
-        account_info[cp]["transaction_count"] += 1
-        if debit > 0:
-            # Owner debits = counterparty receives (credit)
-            account_info[cp]["total_credit"] = round(
-                account_info[cp]["total_credit"] + debit, 2
-            )
-            _add_edge(owner_id, cp, debit)
-        if credit > 0:
-            # Owner credits = counterparty sent (debit)
-            account_info[cp]["total_debit"] = round(
-                account_info[cp]["total_debit"] + credit, 2
-            )
-            _add_edge(cp, owner_id, credit)
-
-    # --- Filter to top N accounts by total volume ---
-    all_accounts = list(account_info.values())
-    all_accounts.sort(
-        key=lambda a: a["total_debit"] + a["total_credit"],
-        reverse=True,
+    filename = f"VISTA_Report_{case_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
-    # Always keep primary accounts, fill remaining slots with top counterparties
-    primary = [a for a in all_accounts if a["type"] == "primary"]
-    others = [a for a in all_accounts if a["type"] != "primary"]
-    remaining_slots = max(0, top_n - len(primary))
-    kept = primary + others[:remaining_slots]
-    kept_ids = {a["id"] for a in kept}
 
-    # Only return edges between kept accounts
-    filtered_edges = [
-        e for e in edge_agg.values()
-        if e["source"] in kept_ids and e["target"] in kept_ids
-    ]
 
-    return {
-        "accounts": kept,
-        "edges": filtered_edges,
-        "total_accounts": len(all_accounts),
-        "total_edges": len(edge_agg),
-    }
+@app.get("/api/case/{case_id}/export/pdf")
+async def export_pdf_report(case_id: str):
+    """Download a PDF investigation report."""
+    if case_id not in all_transactions:
+        raise HTTPException(status_code=404, detail="Case not found")
+
+    case = cases[case_id]
+    txns = all_transactions[case_id]
+    analysis = _get_analysis(case_id)
+
+    pdf_bytes = export_pdf(case, txns, analysis)
+
+    filename = f"VISTA_Report_{case_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

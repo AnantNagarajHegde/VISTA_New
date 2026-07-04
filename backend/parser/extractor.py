@@ -23,6 +23,8 @@ try:
     import pypdfium2 as pdfium
 except Exception:
     pdfium = None
+import threading
+_pdfium_lock = threading.Lock()
 
 
 FIELD_KEYWORDS = {
@@ -415,20 +417,21 @@ def _extract_pdf_text_fast(filepath: str) -> str:
     if pdfium is None:
         return ""
 
-    parts = []
-    document = pdfium.PdfDocument(filepath)
-    try:
-        for page_index in range(len(document)):
-            page = document[page_index]
-            text_page = page.get_textpage()
-            try:
-                parts.append(text_page.get_text_range())
-            finally:
-                text_page.close()
-                page.close()
-    finally:
-        document.close()
-    return "\n".join(parts)
+    with _pdfium_lock:
+        parts = []
+        document = pdfium.PdfDocument(filepath)
+        try:
+            for page_index in range(len(document)):
+                page = document[page_index]
+                text_page = page.get_textpage()
+                try:
+                    parts.append(text_page.get_text_range())
+                finally:
+                    text_page.close()
+                    page.close()
+        finally:
+            document.close()
+        return "\n".join(parts)
 
 
 def extract_pdf(filepath: str) -> Optional[pd.DataFrame]:

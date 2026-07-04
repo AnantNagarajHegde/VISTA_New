@@ -3,7 +3,10 @@ import CaseControl from './components/CaseControl';
 import CaseDetails from './components/CaseDetails';
 import TransactionsTable from './components/TransactionsTable';
 import FileResults from './components/FileResults';
-import MoneyFlowGraph from './components/MoneyFlowGraph';
+import FundFlowTable from './components/FundFlowTable';
+import RoundTripsTable from './components/RoundTripsTable';
+import SuspiciousAccounts from './components/SuspiciousAccounts';
+import ExportPanel from './components/ExportPanel';
 import {
   createCase,
   getCase,
@@ -11,13 +14,15 @@ import {
   getFileResults,
   uploadFiles,
   loadDemoCase,
-  getFlowData,
+  getAnalysis,
+  downloadExcel,
+  downloadPdf,
 } from './api';
 import type {
   CaseData,
   TransactionsResponse,
   FileResult,
-  FlowData,
+  AnalysisData,
 } from './api';
 
 interface Toast {
@@ -26,17 +31,19 @@ interface Toast {
   type: 'success' | 'error';
 }
 
+type TabId = 'transactions' | 'files' | 'fundflow' | 'roundtrips' | 'suspicious' | 'export';
+
 function App() {
   const [caseData, setCaseData] = useState<CaseData | null>(null);
   const [transactions, setTransactions] = useState<TransactionsResponse | null>(null);
   const [fileResultsList, setFileResultsList] = useState<FileResult[]>([]);
-  const [flowData, setFlowData] = useState<FlowData | null>(null);
-  const [flowLoading, setFlowLoading] = useState(false);
+  const [analysisData, setAnalysisData] = useState<AnalysisData | null>(null);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('');
   const [loadingSubMessage, setLoadingSubMessage] = useState('');
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [activeTab, setActiveTab] = useState<'transactions' | 'files' | 'flow'>('transactions');
+  const [activeTab, setActiveTab] = useState<TabId>('transactions');
 
   const addToast = useCallback((message: string, type: 'success' | 'error') => {
     const id = Date.now();
@@ -57,16 +64,25 @@ function App() {
       setTransactions(txns);
       setFileResultsList(files.files);
 
-      // Fetch flow data in background
-      setFlowLoading(true);
-      getFlowData(caseId)
-        .then(fd => setFlowData(fd))
-        .catch(err => console.error('Failed to get flow data:', err))
-        .finally(() => setFlowLoading(false));
+      // Fetch analysis in background
+      setAnalysisLoading(true);
+      getAnalysis(caseId)
+        .then(ad => {
+          setAnalysisData(ad);
+          // Auto-switch to round trips tab if any found
+          if (ad.round_trips.length > 0) {
+            addToast(
+              `Analysis complete: ${ad.round_trips.length} round-trip cycles, ${ad.suspicious_accounts.length} suspicious accounts detected`,
+              'success'
+            );
+          }
+        })
+        .catch(err => console.error('Failed to get analysis:', err))
+        .finally(() => setAnalysisLoading(false));
     } catch (err) {
       console.error('Failed to refresh data:', err);
     }
-  }, []);
+  }, [addToast]);
 
   const handleCreateCase = useCallback(async () => {
     setIsLoading(true);
@@ -77,6 +93,7 @@ function App() {
       setCaseData(newCase);
       setTransactions(null);
       setFileResultsList([]);
+      setAnalysisData(null);
       addToast(`Case "${newCase.name}" created successfully`, 'success');
     } catch (err) {
       addToast(`Failed to create case: ${err}`, 'error');
@@ -132,6 +149,37 @@ function App() {
     }
   }, [caseData]);
 
+  const handleDownloadExcel = useCallback(async () => {
+    if (!caseData) return;
+    try {
+      await downloadExcel(caseData.id);
+      addToast('Excel report downloaded successfully', 'success');
+    } catch (err) {
+      addToast(`Excel export failed: ${err}`, 'error');
+    }
+  }, [caseData, addToast]);
+
+  const handleDownloadPdf = useCallback(async () => {
+    if (!caseData) return;
+    try {
+      await downloadPdf(caseData.id);
+      addToast('PDF report downloaded successfully', 'success');
+    } catch (err) {
+      addToast(`PDF export failed: ${err}`, 'error');
+    }
+  }, [caseData, addToast]);
+
+  const hasData = !!(transactions || fileResultsList.length > 0);
+
+  const tabs: { id: TabId; label: string; count?: string }[] = [
+    { id: 'transactions', label: 'Transactions', count: transactions?.total?.toLocaleString() ?? '0' },
+    { id: 'files', label: 'Files', count: String(fileResultsList.length) },
+    { id: 'fundflow', label: 'Fund Flow', count: analysisData ? String(analysisData.fund_flow_summary.length) : '' },
+    { id: 'roundtrips', label: 'Round Trips', count: analysisData ? String(analysisData.round_trips.length) : '' },
+    { id: 'suspicious', label: 'Suspicious', count: analysisData ? String(analysisData.suspicious_accounts.length) : '' },
+    { id: 'export', label: 'Export', count: '' },
+  ];
+
   return (
     <div className="app-container">
       {/* Header */}
@@ -139,7 +187,7 @@ function App() {
         <div className="app-logo">
           <div className="app-logo-icon">V</div>
           <span className="app-logo-text">VISTA</span>
-          <span className="app-logo-version">v1.0 MVP</span>
+          <span className="app-logo-version">v2.0</span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           {caseData && (
@@ -163,26 +211,17 @@ function App() {
       </div>
 
       {/* Tab Bar */}
-      {(transactions || fileResultsList.length > 0) && (
+      {hasData && (
         <div className="tabs">
-          <button
-            className={`tab ${activeTab === 'transactions' ? 'active' : ''}`}
-            onClick={() => setActiveTab('transactions')}
-          >
-            Transactions ({transactions?.total.toLocaleString() ?? 0})
-          </button>
-          <button
-            className={`tab ${activeTab === 'files' ? 'active' : ''}`}
-            onClick={() => setActiveTab('files')}
-          >
-            Processed Files ({fileResultsList.length})
-          </button>
-          <button
-            className={`tab ${activeTab === 'flow' ? 'active' : ''}`}
-            onClick={() => setActiveTab('flow')}
-          >
-            Money Flow {flowData ? `(${flowData.accounts.length})` : ''}
-          </button>
+          {tabs.map(tab => (
+            <button
+              key={tab.id}
+              className={`tab ${activeTab === tab.id ? 'active' : ''}`}
+              onClick={() => setActiveTab(tab.id)}
+            >
+              {tab.label}{tab.count ? ` (${tab.count})` : ''}
+            </button>
+          ))}
         </div>
       )}
 
@@ -197,8 +236,32 @@ function App() {
       {activeTab === 'files' && (
         <FileResults files={fileResultsList} />
       )}
-      {activeTab === 'flow' && (
-        <MoneyFlowGraph data={flowData} isLoading={flowLoading} />
+      {activeTab === 'fundflow' && (
+        <FundFlowTable
+          data={analysisData?.fund_flow_summary ?? []}
+          isLoading={analysisLoading}
+        />
+      )}
+      {activeTab === 'roundtrips' && (
+        <RoundTripsTable
+          data={analysisData?.round_trips ?? []}
+          isLoading={analysisLoading}
+        />
+      )}
+      {activeTab === 'suspicious' && (
+        <SuspiciousAccounts
+          data={analysisData?.suspicious_accounts ?? []}
+          isLoading={analysisLoading}
+        />
+      )}
+      {activeTab === 'export' && (
+        <ExportPanel
+          analysisData={analysisData}
+          caseId={caseData?.id ?? null}
+          onDownloadExcel={handleDownloadExcel}
+          onDownloadPdf={handleDownloadPdf}
+          isLoading={isLoading || analysisLoading}
+        />
       )}
 
       {/* Loading Overlay */}
@@ -227,4 +290,3 @@ function App() {
 }
 
 export default App;
-
