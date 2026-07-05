@@ -105,6 +105,56 @@ def _extract_beneficiary_account(narration: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# 0. Normalize Transactions (Deduplication)
+# ---------------------------------------------------------------------------
+
+def normalize_transactions(transactions: list[dict]) -> list[dict]:
+    """Resolve accounts and deduplicate transactions.
+    
+    1. Maps source files to resolved account numbers.
+    2. Groups transactions by resolved account.
+    3. Deduplicates within each account using date, amount, and simplified narration.
+    """
+    owner_map = _owner_account_map(transactions)
+    
+    # Group by resolved owner
+    by_owner: dict[str, list[dict]] = defaultdict(list)
+    for txn in transactions:
+        sf = (txn.get("source_file") or "").strip()
+        owner = owner_map.get(sf)
+        if owner:
+            by_owner[owner].append(txn)
+            
+    normalized: list[dict] = []
+    
+    for owner, txn_list in by_owner.items():
+        seen = set()
+        for txn in txn_list:
+            # Simplify narration: drop non-alphanumeric to handle parse variations
+            raw_nar = str(txn.get("narration") or "").lower()
+            simp_nar = re.sub(r'[^a-z0-9]', '', raw_nar)
+            
+            # Key ignores exact source_file to dedup across multiple file exports
+            key = (
+                owner,
+                txn.get("date") or "",
+                _money(txn.get("debit")),
+                _money(txn.get("credit")),
+                simp_nar,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            
+            # Ensure the transaction uses the resolved owner account_no
+            clean_txn = dict(txn)
+            clean_txn["account_no"] = owner
+            normalized.append(clean_txn)
+            
+    return normalized
+
+
+# ---------------------------------------------------------------------------
 # 1. Build account graph using amount+date correlation
 # ---------------------------------------------------------------------------
 
@@ -333,11 +383,24 @@ def detect_round_trips(
     adj: dict[str, list[tuple[str, float, int, str, str]]] = defaultdict(list)
     for key_str, edata in edges_raw.items():
         src, dst = key_str.split("|", 1)
+        # Issue 4: Only use verified transfer edges
+        if edata.get("method") == "amount_date_correlation":
+            continue
         if edata["amount"] < min_amount:
             continue
-        dates = sorted(edata["dates"]) if edata["dates"] else []
-        date_min = dates[0] if dates else ""
-        date_max = dates[-1] if dates else ""
+            
+        # Issue 4: Filter out invalid epoch dates (before 2000)
+        valid_dates = []
+        for d in edata.get("dates", []):
+            if d.startswith("18") or d.startswith("19"):
+                continue
+            valid_dates.append(d)
+            
+        if not valid_dates:
+            continue
+            
+        date_min = sorted(valid_dates)[0]
+        date_max = sorted(valid_dates)[-1]
         adj[src].append((dst, edata["amount"], edata["count"], date_min, date_max))
 
     all_node_ids = list(nodes.keys())
@@ -387,12 +450,20 @@ def detect_round_trips(
     results: list[dict] = []
     for cycle_path, total_amount in found_cycles:
         hops = []
+        skip_cycle = False
         for i in range(len(cycle_path)):
             src = cycle_path[i]
             dst = cycle_path[(i + 1) % len(cycle_path)]
             edge_key = f"{src}|{dst}"
             edata = edges_raw.get(edge_key, {})
-            dates = sorted(edata.get("dates", []))
+            # Re-apply date filtering to hops
+            valid_dates = [d for d in edata.get("dates", []) if not (d.startswith("18") or d.startswith("19"))]
+            dates = sorted(valid_dates)
+            
+            if not dates:
+                skip_cycle = True
+                break
+                
             hops.append({
                 "from": src,
                 "to": dst,
@@ -401,6 +472,21 @@ def detect_round_trips(
                 "date_range": f"{dates[0]} to {dates[-1]}" if len(dates) >= 2 else (dates[0] if dates else ""),
                 "method": edata.get("method", ""),
             })
+            
+        if skip_cycle:
+            continue
+            
+        # Issue 4: Enforce 1-day gap for 2-hop cycles (A->B->A refund pattern)
+        if len(cycle_path) == 2:
+            d1_str = hops[0]["date_range"].split(" to ")[-1]
+            d2_str = hops[1]["date_range"].split(" to ")[0]
+            try:
+                dt1 = datetime.strptime(d1_str, "%Y-%m-%d")
+                dt2 = datetime.strptime(d2_str, "%Y-%m-%d")
+                if (dt2 - dt1).days < 1:
+                    continue
+            except (ValueError, TypeError):
+                continue
 
         all_dates = []
         for h in hops:
@@ -464,7 +550,8 @@ def compute_money_trail(
     for account_id, txn_list in by_account.items():
         for i, txn in enumerate(txn_list):
             credit = _money(txn.get("credit"))
-            if credit < 5000:
+            # Issue 7: Ignore implausibly large amounts > 100M (probably misparsed ref IDs)
+            if credit < 5000 or credit > 100_000_000:
                 continue
 
             remaining = credit
@@ -535,6 +622,7 @@ def compute_fund_flow_summary(graph: dict) -> list[dict]:
             "transaction_count": edata["count"],
             "date_range": f"{dates[0]} to {dates[-1]}" if len(dates) >= 2 else (dates[0] if dates else ""),
             "method": edata.get("method", ""),
+            "confidence_level": "VERIFIED" if edata.get("method") != "amount_date_correlation" else "POSSIBLE",
         })
 
     results.sort(key=lambda r: r["total_amount"], reverse=True)
@@ -645,7 +733,12 @@ def generate_case_summary(
     unique_owners = set(owner_map.values())
     all_accounts = set(graph.get("nodes", {}).keys())
 
-    dates = sorted(t.get("date") or "" for t in transactions if t.get("date"))
+    valid_dates = []
+    for t in transactions:
+        d = t.get("date")
+        if d and re.match(r"^\d{4}-\d{2}-\d{2}$", str(d)):
+            valid_dates.append(str(d))
+    dates = sorted(valid_dates)
     total_debit = sum(_money(t.get("debit")) for t in transactions)
     total_credit = sum(_money(t.get("credit")) for t in transactions)
 
@@ -671,17 +764,21 @@ def generate_case_summary(
 
 def run_full_analysis(transactions: list[dict]) -> dict:
     """Run the complete analysis pipeline and return all results."""
-    graph = build_account_graph(transactions)
+    # Issue 3: Deduplicate and resolve accounts first
+    normalized_txns = normalize_transactions(transactions)
+    
+    graph = build_account_graph(normalized_txns)
     round_trips = detect_round_trips(graph)
-    money_trail = compute_money_trail(transactions)
+    money_trail = compute_money_trail(normalized_txns)
     fund_flows = compute_fund_flow_summary(graph)
     suspicious = detect_suspicious_accounts(graph, round_trips)
     summary = generate_case_summary(
-        transactions, graph, round_trips, suspicious, fund_flows
+        normalized_txns, graph, round_trips, suspicious, fund_flows
     )
 
     return {
         "summary": summary,
+        "normalized_transactions": normalized_txns,
         "round_trips": round_trips,
         "money_trail": money_trail,
         "fund_flow_summary": fund_flows,

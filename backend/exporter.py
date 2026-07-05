@@ -43,8 +43,23 @@ def _money_str(value) -> str:
     return f"{v:,.2f}"
 
 
+import re
+
 def _money_inr(value) -> str:
     return f"₹{_money_str(value)}"
+
+# XML 1.0 illegal characters regex
+ILLEGAL_XML_RE = re.compile(
+    "[\x00-\x08\x0b\x0c\x0e-\x1F\uD800-\uDFFF\uFFFE\uFFFF\U0000FDD0-\U0000FDEF]"
+)
+
+def sanitize_xml_text(value) -> str:
+    """Strip XML-illegal characters that corrupt openpyxl."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        return value
+    return ILLEGAL_XML_RE.sub(" ", value)
 
 
 # ---------------------------------------------------------------------------
@@ -57,53 +72,63 @@ def export_excel(
     analysis: dict,
 ) -> bytes:
     """Generate a multi-sheet Excel workbook and return as bytes."""
+    # Issue 3: Use normalized_transactions from analysis if available, otherwise raw
+    export_txns = analysis.get("normalized_transactions", transactions)
     output = io.BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         # Sheet 1: Case Summary
         summary = analysis.get("summary", {})
         summary_rows = [
-            ["Case Name", case_data.get("name", "")],
-            ["Investigator", case_data.get("investigator", "")],
+            ["Case Name", sanitize_xml_text(case_data.get("name", ""))],
+            ["Investigator", sanitize_xml_text(case_data.get("investigator", ""))],
             ["Generated At", datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
             [""],
-            ["Total Source Files", summary.get("total_source_files", 0)],
-            ["Total Primary Accounts", summary.get("total_primary_accounts", 0)],
-            ["Total Unique Accounts", summary.get("total_unique_accounts", 0)],
-            ["Total Transactions", summary.get("total_transactions", 0)],
-            ["Date Range", summary.get("date_range", "")],
-            ["Total Debit (₹)", summary.get("total_debit", 0)],
-            ["Total Credit (₹)", summary.get("total_credit", 0)],
+            ["Total Source Files", summary.get("total_source_files", 0) if summary.get("total_source_files") not in (None, "") else 0],
+            ["Total Primary Accounts", summary.get("total_primary_accounts", 0) if summary.get("total_primary_accounts") not in (None, "") else 0],
+            ["Total Unique Accounts", summary.get("total_unique_accounts", 0) if summary.get("total_unique_accounts") not in (None, "") else 0],
+            ["Total Transactions", summary.get("total_transactions", 0) if summary.get("total_transactions") not in (None, "") else 0],
+            ["Date Range", sanitize_xml_text(summary.get("date_range", ""))],
+            ["Total Debit (₹)", summary.get("total_debit", 0) if summary.get("total_debit") not in (None, "") else 0],
+            ["Total Credit (₹)", summary.get("total_credit", 0) if summary.get("total_credit") not in (None, "") else 0],
             [""],
-            ["Round Trips Detected", summary.get("round_trips_detected", 0)],
-            ["Suspicious Accounts", summary.get("suspicious_accounts_count", 0)],
-            ["Critical Risk Accounts", summary.get("critical_accounts", 0)],
-            ["High Risk Accounts", summary.get("high_risk_accounts", 0)],
+            ["Round Trips Detected", summary.get("round_trips_detected", 0) if summary.get("round_trips_detected") not in (None, "") else 0],
+            ["Suspicious Accounts", summary.get("suspicious_accounts_count", 0) if summary.get("suspicious_accounts_count") not in (None, "") else 0],
+            ["Critical Risk Accounts", summary.get("critical_accounts", 0) if summary.get("critical_accounts") not in (None, "") else 0],
+            ["High Risk Accounts", summary.get("high_risk_accounts", 0) if summary.get("high_risk_accounts") not in (None, "") else 0],
         ]
         pd.DataFrame(summary_rows, columns=["Metric", "Value"]).to_excel(
             writer, sheet_name="Case Summary", index=False
         )
 
         # Sheet 2: All Transactions
-        if transactions:
+        if export_txns:
             tx_cols = [
                 "date", "narration", "debit", "credit", "balance",
                 "source_file", "account_no", "counterparty_account",
                 "upi_id", "ifsc", "tran_id", "is_reversed", "review_reasons",
             ]
             tx_data = []
-            for txn in transactions:
-                row = {col: txn.get(col) for col in tx_cols}
+            for txn in export_txns:
+                row = {col: sanitize_xml_text(txn.get(col)) for col in tx_cols}
                 tx_data.append(row)
             pd.DataFrame(tx_data).to_excel(
                 writer, sheet_name="All Transactions", index=False
             )
 
-        # Sheet 3: Fund Flow Summary
+        # Sheet 3: Verified Fund Flows
         fund_flows = analysis.get("fund_flow_summary", [])
-        if fund_flows:
-            pd.DataFrame(fund_flows).to_excel(
-                writer, sheet_name="Fund Flow Summary", index=False
+        verified_flows = [f for f in fund_flows if f.get("confidence_level") == "VERIFIED"]
+        if verified_flows:
+            pd.DataFrame(verified_flows).to_excel(
+                writer, sheet_name="Verified Fund Flows", index=False
+            )
+            
+        # Sheet 3b: Possible Leads
+        possible_flows = [f for f in fund_flows if f.get("confidence_level") == "POSSIBLE"]
+        if possible_flows:
+            pd.DataFrame(possible_flows).to_excel(
+                writer, sheet_name="Possible Leads", index=False
             )
 
         # Sheet 4: Round Trip Cycles
@@ -169,16 +194,16 @@ def export_excel(
             sa_rows = []
             for acc in suspicious:
                 sa_rows.append({
-                    "Account ID": acc["account_id"],
+                    "Account ID": sanitize_xml_text(acc["account_id"]),
                     "Is Primary": "Yes" if acc["is_primary"] else "No",
-                    "Total In (₹)": acc["total_in"],
-                    "Total Out (₹)": acc["total_out"],
-                    "Net Flow (₹)": acc["net_flow"],
-                    "Transactions": acc["tx_count"],
-                    "Fan In": acc["fan_in"],
-                    "Fan Out": acc["fan_out"],
+                    "Total In (₹)": acc.get("total_in", 0) if acc.get("total_in") not in (None, "") else 0,
+                    "Total Out (₹)": acc.get("total_out", 0) if acc.get("total_out") not in (None, "") else 0,
+                    "Net Flow (₹)": acc.get("net_flow", 0) if acc.get("net_flow") not in (None, "") else 0,
+                    "Transactions": acc.get("tx_count", 0) if acc.get("tx_count") not in (None, "") else 0,
+                    "Fan In": acc.get("fan_in", 0) if acc.get("fan_in") not in (None, "") else 0,
+                    "Fan Out": acc.get("fan_out", 0) if acc.get("fan_out") not in (None, "") else 0,
                     "Risk Level": acc["risk_level"],
-                    "Reasons": "; ".join(acc["reasons"]),
+                    "Reasons": sanitize_xml_text("; ".join(acc["reasons"])),
                 })
             pd.DataFrame(sa_rows).to_excel(
                 writer, sheet_name="Suspicious Accounts", index=False
@@ -196,7 +221,9 @@ def export_pdf(
     transactions: list[dict],
     analysis: dict,
 ) -> bytes:
-    """Generate a PDF investigation report and return as bytes."""
+    """Generate a PDF investigation report."""
+    export_txns = analysis.get("normalized_transactions", transactions)
+    
     if not _REPORTLAB_AVAILABLE:
         # Fallback: return a simple text-based PDF-like summary
         return _fallback_pdf(case_data, transactions, analysis)
